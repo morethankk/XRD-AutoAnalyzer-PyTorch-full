@@ -289,12 +289,6 @@ dependencies = [
 ]
 ```
 
-**Benefits**:
-- 📦 **Smaller Installation**: Reduced package size by 40%
-- 🔄 **Faster Setup**: Quicker installation process
-- 🛡️ **Better Compatibility**: Fewer version conflicts
-- 🔧 **Modern Stack**: Latest PyTorch ecosystem features
-
 ### File Structure Evolution
 ```
 # BEFORE
