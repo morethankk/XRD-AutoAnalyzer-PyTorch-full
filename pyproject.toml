@@ -27,4 +27,4 @@ dependencies = [
 where = ["."]
 
 [project.urls]
-Homepage = "https://github.com/njszym/XRD-AutoAnalyzer"
+Homepage = "https://github.com/morethankk/XRD-AutoAnalyzer-PyTorch-full"
