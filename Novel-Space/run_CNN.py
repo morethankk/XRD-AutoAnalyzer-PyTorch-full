@@ -19,7 +19,7 @@ if __name__ == '__main__':
     unknown_threshold = 25.0 # default: raise warning when peaks with >= 25% intensity are unknown
     show_reduced = False # Whether to plot reduced spectrum (after subtraction of known phases)
     inc_pdf = False # Whether to include PDF analysis (requires trained model first)
-    parallel = True # Run phase analysis in parallel across available CPUs
+    parallel = False # Run phase analysis in parallel across available CPUs
     raw = True # Whether to show the raw spectrum or its denoised product
     show_indiv = False # Whether to show individual predictions from XRD and PDF
     refined_phases_dir = None
