@@ -4,7 +4,7 @@ This is a PyTorch implementation of the [XRD-AutoAnalyzer](https://github.com/nj
 
 ## Installation
 
-The package is available on PyPI and can be installed as follows:
+The package can be installed as follows:
 
 ```
 git clone https://github.com/morethankk/XRD-AutoAnalyzer-PyTorch-full.git
