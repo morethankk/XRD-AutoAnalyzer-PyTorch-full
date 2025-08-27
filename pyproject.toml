@@ -1,3 +1,30 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:aaaada1ed4fb72f03781099f563b89e23493b3b123ef31abc8f64b9b9bd7215d
-size 637
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoXRD"
+version = "0.0.6"
+description = "A package for automated XRD analysis"
+authors = [
+    {name = "Nathan J. Szymanski", email = "nathan_szymanski@berkeley.edu"},
+]
+dependencies = [
+    "numpy",
+    "pymatgen",
+    "scipy",
+    "scikit-image>=0.23.1",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "pyxtal",
+    "pyts",
+    "tqdm",
+    "asteval",
+    "numexpr>=2.8.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.urls]
+Homepage = "https://github.com/njszym/XRD-AutoAnalyzer"
