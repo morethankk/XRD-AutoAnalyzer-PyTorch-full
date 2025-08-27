@@ -160,7 +160,7 @@ if __name__ == '__main__':
 
             # Get weight fractions
             weights = quantifier.main('Spectra', spectrum_fname, phasenames, heights, min_angle, max_angle,
-                wavelength, refined_phases_dirrefined_phases_dir)
+                wavelength, refined_phases_dir)
             weights = [round(val, 2) for val in weights]
             print('Weight fractions: %s' % weights)
 
