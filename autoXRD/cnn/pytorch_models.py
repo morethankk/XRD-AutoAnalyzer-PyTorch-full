@@ -16,6 +16,7 @@ from typing import Tuple, List, Optional
 import sys
 import os
 from tqdm import tqdm
+from typing import List
 
 # Set random seeds for reproducibility
 np.random.seed(1)
@@ -39,7 +40,132 @@ class AlwaysDropout(nn.Module):
         """Apply dropout regardless of training mode."""
         return F.dropout(x, p=self.p, training=True)
 
+# ---------------------------
+# DynamicConv1D
+# ---------------------------
+class DynamicConv1D(nn.Module):
+    """
+    Dynamic convolutional layer that dynamically adjusts the kernel size based on input size.
+    """
 
+    def __init__(self, channels: int, kernel_size: int = 3):
+        super().__init__()
+        self.channels = channels
+        self.kernel_size = kernel_size
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, channels // 2),
+            nn.GELU(),
+            nn.Linear(channels // 2, channels * kernel_size)
+        )
+
+        # Initialize weights to zero, not disrupt backbone stability
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, L]
+        B, C, L = x.shape
+        pooled = self.global_pool(x).squeeze(-1)          # [B, C]
+        weights = self.mlp(pooled)                        # [B, C*kernel]
+        weights = weights.view(B * C, 1, self.kernel_size)
+
+        x_ = x.reshape(1, B * C, L)
+        out = F.conv1d(x_, weights, padding=self.kernel_size // 2, groups=B * C)
+        out = out.reshape(B, C, L)
+        return out
+
+# ---------------------------
+# XRDNet with DynamicConv1D
+# ---------------------------
+class XRDNetWithDynamic(nn.Module):
+    """
+    XRDNet with DynamicConv1D for XRD pattern classification.
+    """
+    def __init__(self, num_classes: int, n_dense: List[int] = [3100, 1200], dropout_rate: float = 0.7):
+        super().__init__()
+
+        # Main branch convolution
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=35, stride=1, padding=35 // 2)
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        # New branches: large kernel and dynamic convolution
+        self.large_kernel = nn.Conv1d(64, 64, kernel_size=101, stride=1, padding=101 // 2)
+        self.dynamic = DynamicConv1D(64, kernel_size=3)
+
+        # Subsequent convolutional layers
+        self.conv2 = nn.Conv1d(64, 64, kernel_size=30, stride=1, padding=30 // 2)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        self.conv3 = nn.Conv1d(64, 64, kernel_size=25, stride=1, padding=25 // 2)
+        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        self.conv4 = nn.Conv1d(64, 64, kernel_size=20, stride=1, padding=20 // 2)
+        self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        self.conv5 = nn.Conv1d(64, 64, kernel_size=15, stride=1, padding=15 // 2)
+        self.pool5 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        self.conv6 = nn.Conv1d(64, 64, kernel_size=10, stride=1, padding=10 // 2)
+        self.pool6 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        # flatten
+        self._calculate_conv_output_size()
+
+        # Full connection layers
+        self.dropout1 = AlwaysDropout(dropout_rate)
+        self.fc1 = nn.Linear(self.conv_output_size, n_dense[0])
+        self.bn1 = nn.BatchNorm1d(n_dense[0])
+
+        self.dropout2 = AlwaysDropout(dropout_rate)
+        self.fc2 = nn.Linear(n_dense[0], n_dense[1])
+        self.bn2 = nn.BatchNorm1d(n_dense[1])
+
+        self.dropout3 = AlwaysDropout(dropout_rate)
+        self.fc3 = nn.Linear(n_dense[1], num_classes)
+
+    def _calculate_conv_output_size(self):
+        size = 4501  # input size
+        for _ in range(6):  # 6 convolutional layers
+            size = size // 2
+        self.conv_output_size = size * 64
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 2:  # [B, L]
+            x = x.unsqueeze(1)
+        if x.dim() == 3 and x.shape[1] == 1:  # [B,1,L]
+            pass
+
+        # conv1 + pool1
+        x = F.relu(self.conv1(x))
+        x = self.pool1(x)
+
+        # --- Fuse large kernel and dynamic convolution ---
+        x_lk = self.large_kernel(x)   # Static large kernel
+        x_dyn = self.dynamic(x)       # Dynamic small kernel
+        x = x + x_lk + x_dyn
+
+        # Subsequent convolutional layers
+        x = F.relu(self.conv2(x)); x = self.pool2(x)
+        x = F.relu(self.conv3(x)); x = self.pool3(x)
+        x = F.relu(self.conv4(x)); x = self.pool4(x)
+        x = F.relu(self.conv5(x)); x = self.pool5(x)
+        x = F.relu(self.conv6(x)); x = self.pool6(x)
+
+        # flatten + fully connected layers
+        x = x.view(x.size(0), -1)
+
+        x = self.dropout1(x)
+        x = F.relu(self.fc1(x)); x = self.bn1(x)
+
+        x = self.dropout2(x)
+        x = F.relu(self.fc2(x)); x = self.bn2(x)
+
+        x = self.dropout3(x)
+        x = self.fc3(x)
+
+        return F.softmax(x, dim=1)
+    
 class XRDNet(nn.Module):
     """
     1D Convolutional Neural Network for XRD pattern classification.
@@ -58,24 +184,24 @@ class XRDNet(nn.Module):
         """
         super(XRDNet, self).__init__()
         
-        # Convolutional layers with progressive kernel size reduction
+        # Convolutional layers with progressive kernel size reduction and optimized pooling
         self.conv1 = nn.Conv1d(1, 64, kernel_size=35, stride=1, padding=35//2)
-        self.pool1 = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         self.conv2 = nn.Conv1d(64, 64, kernel_size=30, stride=1, padding=30//2)
-        self.pool2 = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         self.conv3 = nn.Conv1d(64, 64, kernel_size=25, stride=1, padding=25//2)
         self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         self.conv4 = nn.Conv1d(64, 64, kernel_size=20, stride=1, padding=20//2)
-        self.pool4 = nn.MaxPool1d(kernel_size=1, stride=2, padding=0)
+        self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         self.conv5 = nn.Conv1d(64, 64, kernel_size=15, stride=1, padding=15//2)
-        self.pool5 = nn.MaxPool1d(kernel_size=1, stride=2, padding=0)
+        self.pool5 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         self.conv6 = nn.Conv1d(64, 64, kernel_size=10, stride=1, padding=10//2)
-        self.pool6 = nn.MaxPool1d(kernel_size=1, stride=2, padding=0)
+        self.pool6 = nn.MaxPool1d(kernel_size=2, stride=2, padding=0)
         
         # Calculate flattened size after all conv and pooling layers
         self._calculate_conv_output_size()
@@ -97,13 +223,13 @@ class XRDNet(nn.Module):
         # Start with input size of 4501
         size = 4501
         
-        # Apply each conv + pool operation
-        size = ((size + 2*1 - 3) // 2) + 1  # pool1
-        size = ((size + 2*1 - 3) // 2) + 1  # pool2  
-        size = ((size + 2*0 - 2) // 2) + 1  # pool3
-        size = ((size + 2*0 - 1) // 2) + 1  # pool4
-        size = ((size + 2*0 - 1) // 2) + 1  # pool5
-        size = ((size + 2*0 - 1) // 2) + 1  # pool6
+        # Apply each conv + pool operation (all using stride=2, kernel=2)
+        size = size // 2  # pool1
+        size = size // 2  # pool2  
+        size = size // 2  # pool3
+        size = size // 2  # pool4
+        size = size // 2  # pool5
+        size = size // 2  # pool6
         
         self.conv_output_size = size * 64  # 64 channels
         
@@ -377,13 +503,15 @@ class DataSetUp(object):
             
             return train_loader, val_loader, test_loader
 
-
 def train_model(train_loader: DataLoader, val_loader: DataLoader, 
                 num_phases: int, num_epochs: int, is_pdf: bool, 
                 n_dense: List[int] = [3100, 1200], dropout_rate: float = 0.7,
-                learning_rate: float = 0.001, device: str = None) -> nn.Module:
+                learning_rate: float = 0.0005, device: str = None,
+                patience: int = 15, lr_patience: int = 8,
+                use_dynamic: bool = False) -> nn.Module:
+
     """
-    Train the neural network model with enhanced features.
+    Train the neural network model with enhanced features including learning rate scheduling.
     
     Args:
         train_loader: Training data loader
@@ -393,8 +521,10 @@ def train_model(train_loader: DataLoader, val_loader: DataLoader,
         is_pdf: Whether to use PDF-optimized architecture
         n_dense: Dense layer sizes
         dropout_rate: Dropout probability
-        learning_rate: Learning rate for optimizer
+        learning_rate: Initial learning rate for optimizer (reduced from 0.001 to 0.0005)
         device: Device to use for training ('cuda' or 'cpu')
+        patience: Early stopping patience (epochs without improvement)
+        lr_patience: Learning rate scheduler patience (epochs without improvement before reducing LR)
         
     Returns:
         Trained model
@@ -407,19 +537,35 @@ def train_model(train_loader: DataLoader, val_loader: DataLoader,
         
     print(f"Training on device: {device}")
     
-    # Create model
+
     if is_pdf:
         model = PDFNet(num_phases, n_dense, dropout_rate)
         print("Using PDF-optimized architecture")
     else:
-        model = XRDNet(num_phases, n_dense, dropout_rate)
-        print("Using XRD-optimized architecture")
+        if use_dynamic:
+            model = XRDNetWithDynamic(num_phases, n_dense, dropout_rate)
+            print("Using XRDNet with DynamicConv1D")
+        else:
+            model = XRDNet(num_phases, n_dense, dropout_rate)
+            print("Using standard XRDNet")
+
         
     model.to(device)
     
     # Loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    
+    # Learning rate scheduler - reduce on plateau
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=lr_patience, 
+        verbose=True, min_lr=1e-6
+    )
+    
+    # Early stopping variables
+    best_val_accuracy = 0.0
+    patience_counter = 0
+    best_model_state = None
     
     # Training loop with progress tracking
     train_losses = []
@@ -478,86 +624,103 @@ def train_model(train_loader: DataLoader, val_loader: DataLoader,
         val_losses.append(avg_val_loss)
         val_accuracies.append(val_accuracy)
         
+        # Learning rate scheduling
+        scheduler.step(val_accuracy)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Early stopping and best model tracking
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            patience_counter = 0
+            best_model_state = model.state_dict().copy()
+            print(f"✓ New best validation accuracy: {val_accuracy:.2f}%")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                print(f"Best validation accuracy: {best_val_accuracy:.2f}%")
+                break
+        
         print(f"Epoch {epoch+1}/{num_epochs}: "
               f"Train Loss: {avg_train_loss:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, "
-              f"Val Acc: {val_accuracy:.2f}%")
+              f"Val Acc: {val_accuracy:.2f}%, "
+              f"LR: {current_lr:.2e}, "
+              f"Patience: {patience_counter}/{patience}")
+    
+    # Load best model if we have one
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"\n✓ Loaded best model with validation accuracy: {best_val_accuracy:.2f}%")
     
     print("Training completed!")
-    print(f"Final validation accuracy: {val_accuracies[-1]:.2f}%")
+    print(f"Final validation accuracy: {max(val_accuracies):.2f}%")
     
     return model
 
-
-def save_model(model: nn.Module, filepath: str, is_pdf: bool = False):
+def save_model(model: nn.Module, filepath: str, is_pdf: bool = False, use_dynamic: bool = False):
     """
     Save the trained model with metadata.
-    
-    Args:
-        model: Trained PyTorch model
-        filepath: Path to save the model
-        is_pdf: Whether this is a PDF model
     """
-    # Ensure directory exists
     os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
-    
-    # Save model state dict and metadata
+
+    model_type = 'PDFNet' if is_pdf else ('XRDNetWithDynamic' if use_dynamic else 'XRDNet')
+
     torch.save({
         'model_state_dict': model.state_dict(),
-        'model_type': 'PDFNet' if is_pdf else 'XRDNet',
+        'model_type': model_type,
         'num_classes': model.fc3.out_features,
         'n_dense': [model.fc1.out_features, model.fc2.out_features],
-        'dropout_rate': model.dropout1.p,
-        'is_pdf': is_pdf
+        'dropout_rate': model.dropout1.p if hasattr(model, "dropout1") else None,
+        'is_pdf': is_pdf,
+        'use_dynamic': use_dynamic
     }, filepath)
-    
-    print(f"Model saved to: {filepath}")
 
+    print(f"Model saved to: {filepath}")
+    print(f"Model type: {model_type}")
 
 def load_model(filepath: str, device: str = None) -> nn.Module:
-    """
-    Load a saved PyTorch model.
-    
-    Args:
-        filepath: Path to the saved model
-        device: Device to load the model on
-        
-    Returns:
-        Loaded PyTorch model
-    """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
         device = torch.device(device)
-    
+
     checkpoint = torch.load(filepath, map_location=device)
-    
-    # Create model based on saved type
-    if checkpoint['is_pdf']:
+
+    is_pdf = checkpoint.get('is_pdf', False)
+    use_dynamic = checkpoint.get('use_dynamic', False)
+
+    if is_pdf:
         model = PDFNet(
             checkpoint['num_classes'],
             checkpoint['n_dense'],
             checkpoint['dropout_rate']
         )
     else:
-        model = XRDNet(
-            checkpoint['num_classes'],
-            checkpoint['n_dense'],
-            checkpoint['dropout_rate']
-        )
-    
+        if use_dynamic:
+            model = XRDNetWithDynamic(
+                checkpoint['num_classes'],
+                checkpoint['n_dense'],
+                checkpoint['dropout_rate']
+            )
+        else:
+            model = XRDNet(
+                checkpoint['num_classes'],
+                checkpoint['n_dense'],
+                checkpoint['dropout_rate']
+            )
+
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
-    
+
     print(f"Model loaded from: {filepath}")
-    print(f"Model type: {checkpoint['model_type']}")
+    print(f"Model type: {checkpoint.get('model_type', 'Unknown')}")
     print(f"Number of classes: {checkpoint['num_classes']}")
-    
     return model
 
-
 def main(xrd: np.ndarray, num_epochs: int, testing_fraction: float, 
-         is_pdf: bool, fmodel: str = 'Model.pth'):
+         is_pdf: bool, fmodel: str = 'Model.pth',
+         use_dynamic: bool = False):
     """
     Main training function with enhanced PyTorch implementation.
     
@@ -567,6 +730,7 @@ def main(xrd: np.ndarray, num_epochs: int, testing_fraction: float,
         testing_fraction: Fraction of data for testing
         is_pdf: Whether to use PDF-optimized architecture
         fmodel: Filename to save the trained model
+        use_dynamic: Whether to use XRDNetWithDynamic instead of XRDNet
     """
     print("Setting up data...")
     data_setup = DataSetUp(xrd, testing_fraction)
@@ -584,31 +748,27 @@ def main(xrd: np.ndarray, num_epochs: int, testing_fraction: float,
         print(f"Test batches: {len(test_loader)}")
     
     # Train model
-    model = train_model(train_loader, val_loader, num_phases, num_epochs, is_pdf)
+    model = train_model(
+        train_loader, val_loader,
+        num_phases=num_phases,
+        num_epochs=num_epochs,
+        is_pdf=is_pdf,
+        use_dynamic=use_dynamic
+    )
     
-    # Save model
-    save_model(model, fmodel, is_pdf)
+    # Save model with extra flag
+    save_model(model, fmodel, is_pdf=is_pdf, use_dynamic=use_dynamic)
     
     # Test model if test data is available
     if test_loader is not None:
-        from .pytorch_models import test_model
         test_accuracy = test_model(model, test_loader)
         print(f"Final test accuracy: {test_accuracy:.2f}%")
     
     return model
 
-
 def test_model(model: nn.Module, test_loader: DataLoader, device: str = None) -> float:
     """
-    Evaluate the trained model on test data.
-    
-    Args:
-        model: Trained PyTorch model
-        test_loader: Test data loader
-        device: Device to use for testing
-        
-    Returns:
-        Test accuracy as percentage
+    Evaluate the trained model on test data, with model type info.
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -618,13 +778,23 @@ def test_model(model: nn.Module, test_loader: DataLoader, device: str = None) ->
     model.to(device)
     model.eval()
     
+    # 判断模型类型
+    if isinstance(model, PDFNet):
+        model_type = "PDFNet"
+    elif isinstance(model, XRDNetWithDynamic):
+        model_type = "XRDNetWithDynamic"
+    elif isinstance(model, XRDNet):
+        model_type = "XRDNet"
+    else:
+        model_type = model.__class__.__name__
+    
     correct = 0
     total = 0
     test_loss = 0.0
     criterion = nn.CrossEntropyLoss()
     
     with torch.no_grad():
-        test_pbar = tqdm(test_loader, desc="Testing")
+        test_pbar = tqdm(test_loader, desc=f"Testing [{model_type}]")
         for data, target in test_pbar:
             data, target = data.to(device), target.to(device)
             output = model(data)
@@ -643,6 +813,6 @@ def test_model(model: nn.Module, test_loader: DataLoader, device: str = None) ->
     test_accuracy = 100. * correct / total
     avg_test_loss = test_loss / len(test_loader)
     
-    print(f"Test Results: Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.2f}%")
+    print(f"[{model_type}] Test Results: Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.2f}%")
     
     return test_accuracy
