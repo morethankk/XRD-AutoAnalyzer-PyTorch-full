@@ -22,6 +22,7 @@ This is a PyTorch implementation of the [XRD-AutoAnalyzer](https://github.com/nj
 ```bash
 python construct_xrd_model.py --use_dynamic
 
+
 ## Installation
 
 The package can be installed as follows:
