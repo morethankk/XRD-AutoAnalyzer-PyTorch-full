@@ -2,19 +2,24 @@
 
 This is a PyTorch implementation of the [XRD-AutoAnalyzer](https://github.com/njszym/XRD-AutoAnalyzer.git) project, designed for automatic identification of phases in X-ray diffraction (XRD) patterns. 
 
-## New method
-📌 XRDNetWithDynamic
-✨ Features
-- Large-Kernel Convolution (LKConv)
-A fixed convolution with kernel_size=101 provides a wide receptive field to capture long-range correlations in XRD patterns.
+## New Method
 
-- Dynamic Depthwise Convolution (DynamicConv1D)
-Generates a 3×1 kernel adaptively for each sample and each channel, enabling input-dependent feature extraction.
+### 📌 XRDNetWithDynamic
 
-- Fusion Mechanism
-Combines the outputs of large-kernel convolution and dynamic convolution with the backbone features for better global–local balance.
+### ✨ Features
+- **Large-Kernel Convolution (LKConv)**  
+  A fixed convolution with `kernel_size=101` provides a wide receptive field to capture long-range correlations in XRD patterns.  
 
-🛠 Usage
+- **Dynamic Depthwise Convolution (DynamicConv1D)**  
+  Generates a `3×1` kernel adaptively for each sample and each channel, enabling input-dependent feature extraction.  
+
+- **Fusion Mechanism**  
+  Combines the outputs of large-kernel convolution and dynamic convolution with the backbone features for better global–local balance.  
+
+---
+
+### 🛠 Usage
+```bash
 python construct_xrd_model.py --use_dynamic
 
 ## Installation
