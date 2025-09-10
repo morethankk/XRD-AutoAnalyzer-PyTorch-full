@@ -84,4 +84,16 @@ if __name__ == '__main__':
     # Train, test, and save the CNN with PyTorch
     test_fraction = 0.2
     model_filename = 'Model.pth'  # Use PyTorch format
-    cnn_main(xrd_specs, num_epochs, test_fraction, is_pdf=False, fmodel=model_filename)
+    
+    use_dynamic = False
+    if '--use_dynamic' in sys.argv:
+        use_dynamic = True
+
+    cnn_main(
+        xrd_specs,
+        num_epochs,
+        test_fraction,
+        is_pdf=False,
+        fmodel=model_filename,
+        use_dynamic=use_dynamic
+    )
